@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Questline</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><div class="logo">★</div><span>Questline</span></div>
+      <div id="player" class="player"></div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="goals">🎯 Goals</button>
+      <button class="tab" data-tab="quests">🗺️ Quests <span id="quest-count" class="pill"></span></button>
+      <button class="tab" data-tab="trophies">🏆 Trophy Room</button>
+    </nav>
+
+    <main id="main"></main>
+
+    <div id="modal" class="modal hidden">
+      <form id="goal-form" class="modal-card" autocomplete="off">
+        <h2>New goal</h2>
+        <label>Name<input name="name" placeholder="LeetCode 150" /></label>
+        <label>Category<input name="category" list="category-list" placeholder="Coding" /></label>
+        <datalist id="category-list"></datalist>
+
+        <div class="segmented" id="kind-toggle">
+          <button type="button" data-kind="counter" class="on">🔢 Counter<small>Reach a number</small></button>
+          <button type="button" data-kind="performance">⏱️ Performance<small>Distance in a time</small></button>
+        </div>
+
+        <div class="kind-fields" data-for="counter">
+          <div class="row">
+            <label>Target<input name="target" type="number" min="0" step="any" placeholder="150" /></label>
+            <label>Unit<input name="unit" placeholder="problems" /></label>
+          </div>
+          <label>Already done<input name="start_value" type="number" min="0" step="any" placeholder="0" /></label>
+        </div>
+
+        <div class="kind-fields hidden" data-for="performance">
+          <div class="row">
+            <label>Distance (km)<input name="distance" type="number" min="0" step="any" placeholder="5" /></label>
+            <label>Time (mm:ss)<input name="time" placeholder="30:00" /></label>
+          </div>
+        </div>
+
+        <label>Deadline <span class="muted">· optional, unlocks the pace rival</span>
+          <input name="deadline" type="date" placeholder="YYYY-MM-DD" />
+        </label>
+
+        <p class="form-error" id="form-error"></p>
+        <div class="modal-actions">
+          <button type="button" class="btn ghost" data-action="close-modal">Cancel</button>
+          <button type="submit" class="btn primary">Create goal</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="toasts" class="toasts"></div>
+    <div id="celebration" class="celebration hidden"></div>
+    <canvas id="confetti"></canvas>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
