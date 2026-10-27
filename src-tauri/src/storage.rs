@@ -2,12 +2,30 @@ use crate::model::Store;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// All data lives in `<project>/data` unless QUESTLINE_DATA_DIR is set.
-pub fn data_file() -> PathBuf {
-    let dir = std::env::var_os("QUESTLINE_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("data"));
-    dir.join("questline.json")
+/// The save file: in QUESTLINE_DATA_DIR if set, otherwise in the per-user app data folder
+/// (`~/.local/share/dev.questline.app` on Linux, `%APPDATA%\dev.questline.app` on Windows).
+pub fn data_file(app_data_dir: PathBuf) -> PathBuf {
+    match std::env::var_os("QUESTLINE_DATA_DIR") {
+        Some(dir) => PathBuf::from(dir).join("questline.json"),
+        None => {
+            let path = app_data_dir.join("questline.json");
+            let legacy = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("data").join("questline.json");
+            migrate(&legacy, &path);
+            path
+        }
+    }
+}
+
+/// Earlier builds kept the save file in the project folder. Copy it to the new place once;
+/// the old file stays behind as a backup.
+fn migrate(legacy: &Path, path: &Path) {
+    if path.exists() || !legacy.exists() {
+        return;
+    }
+    let copied = path.parent().map_or(Ok(()), fs::create_dir_all).and_then(|_| fs::copy(legacy, path));
+    if let Err(err) = copied {
+        eprintln!("Could not copy {} to {}: {err}", legacy.display(), path.display());
+    }
 }
 
 pub fn load(path: &Path) -> Store {
@@ -82,6 +100,33 @@ mod tests {
         assert_eq!(loaded.goals[0].name, "Read");
         assert_eq!(loaded.goals[0].milestones_hit, [25]);
         assert!(!path.with_extension("json.tmp").exists(), "temp file is renamed away");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrate_copies_old_save_once() {
+        let dir = scratch("migrate");
+        let legacy = dir.join("old").join("questline.json");
+        let path = dir.join("new").join("questline.json");
+        save(&legacy, &sample()).unwrap();
+
+        migrate(&legacy, &path);
+        assert_eq!(load(&path).profile.xp, 42);
+        assert!(legacy.exists(), "old file is kept as a backup");
+
+        // Once the new file exists, the old one is never copied again.
+        save(&path, &Store::default()).unwrap();
+        migrate(&legacy, &path);
+        assert_eq!(load(&path).profile.xp, 0);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrate_without_old_save_does_nothing() {
+        let dir = scratch("migrate-none");
+        let path = dir.join("questline.json");
+        migrate(&dir.join("missing.json"), &path);
+        assert!(!path.exists());
         fs::remove_dir_all(dir).unwrap();
     }
 

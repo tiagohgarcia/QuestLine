@@ -1,6 +1,6 @@
 # Questline: agent notes
 
-Gamified goal tracker for Linux.
+Gamified goal tracker for Linux and Windows.
 Tauri v2 app: Rust backend in `src-tauri/`, plain HTML/CSS/JS frontend in `ui/` (no bundler, no framework).
 See `README.md` for setup, build commands and the game rules as the user sees them.
 
@@ -18,7 +18,7 @@ Manual testing so far covered launching and creating a goal; the XP, celebration
 - `game.rs`: all game rules. `apply_entry` is the single path for progress updates: it records the entry, then awards XP, milestones, completion, personal bests, quests and badges, and returns `GameEvent`s.
   Every award is tagged with the `EntryRef` that caused it; `undo_last_entry` and `delete_goal` take tagged XP back through `revoke_xp`.
 - `view.rs`: builds the read-only `AppView` snapshot sent to the UI. Derived values (ghost, rival, quest progress) are computed here, not stored.
-- `storage.rs`: JSON load/save with atomic writes.
+- `storage.rs`: JSON load/save with atomic writes, and the save file's location.
 - `main.rs`: Tauri commands. Every command goes through `mutate()`, which locks the store, applies the change, refreshes quests, saves, and returns `{ view, events }`.
 - `ui/app.js`: renders the whole page from `view` on every response and plays `events` as toasts, floating XP and confetti.
 
@@ -33,9 +33,12 @@ Manual testing so far covered launching and creating a goal; the XP, celebration
 ## Gotchas
 
 - `cargo` is in `~/.cargo/bin` and may not be on PATH in non-interactive shells: prefix commands with `export PATH="$HOME/.cargo/bin:$PATH"`.
-- The data file is `data/questline.json`, found via `CARGO_MANIFEST_DIR` at compile time, so dev and release builds share it.
-  It holds the user's real progress: never run dev builds or tests against it.
-  Use `QUESTLINE_DATA_DIR=<scratch dir>` instead.
+- The save file is `questline.json` in Tauri's app data dir (`~/.local/share/dev.questline.app/` on Linux, `%APPDATA%\dev.questline.app\` on Windows), so dev and release builds share it.
+  It holds the user's real progress: never run dev builds against it.
+  Use `QUESTLINE_DATA_DIR=<scratch dir>` instead. Unit tests never touch it.
+- The old save location `data/questline.json` (found via `CARGO_MANIFEST_DIR`) is copied to the new one on first start; the old file is kept as a backup.
+- Windows builds run on GitHub Actions (`.github/workflows/windows.yml`, started by hand) and produce an NSIS installer artifact.
+  Windows can't be built from this Linux machine. `tauri.conf.json` lists only `deb`; the workflow passes `--bundles nsis`.
 - The first build takes a few minutes; ask the user before running `npm run dev` or a release build.
 - The desktop launchers in `~/.local/share/applications/` and `~/Desktop/` point at `src-tauri/target/release/questline`.
 

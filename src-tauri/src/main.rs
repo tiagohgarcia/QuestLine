@@ -11,7 +11,7 @@ use model::{EntryData, Goal, GoalKind, Store};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{Manager, State};
 
 struct AppState {
     store: Mutex<Store>,
@@ -177,10 +177,13 @@ fn delete_goal(state: State<'_, AppState>, id: u64) -> Result<Response, String> 
 }
 
 fn main() {
-    let path = storage::data_file();
-    let store = storage::load(&path);
     tauri::Builder::default()
-        .manage(AppState { store: Mutex::new(store), path })
+        .setup(|app| {
+            let path = storage::data_file(app.path().app_data_dir()?);
+            let store = storage::load(&path);
+            app.manage(AppState { store: Mutex::new(store), path });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_state,
             create_goal,

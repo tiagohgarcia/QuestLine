@@ -1,8 +1,8 @@
 # Questline
 
-A gamified goal tracker for Linux, built with Tauri (Rust backend, HTML/CSS/JS UI).
+A gamified goal tracker for Linux and Windows, built with Tauri (Rust backend, HTML/CSS/JS UI).
 
-## Prerequisites
+## Prerequisites (Linux)
 
 - Rust (via [rustup](https://rustup.rs)), with `cargo` on your PATH.
   On zsh, add `. "$HOME/.cargo/env"` to `~/.zshrc`; zsh does not read `~/.profile`.
@@ -66,16 +66,36 @@ gio set ~/Desktop/questline.desktop metadata::trusted true
 
 Both launchers point at the release binary, so a new release build updates them automatically.
 
+## Windows
+
+The Windows installer is built on GitHub, so no Windows build tools are needed:
+
+1. Push your changes to GitHub.
+2. Open the repository's **Actions** tab, pick **Windows build** and click **Run workflow**.
+3. When the run finishes (about 10–15 minutes), download `questline-windows-installer` from the run's page, unzip it and run the `.exe`.
+
+The installer adds Questline to the Start menu, and running a newer one updates it in place.
+The app isn't code-signed, so Windows SmartScreen may warn about it: click **More info**, then **Run anyway**.
+It needs the WebView2 runtime, which is built into Windows 10 and 11.
+
 ## Data
 
-Progress is saved to `data/questline.json` inside this folder.
-The path is fixed at compile time, so dev and release builds share it.
+Progress is saved to `questline.json` in the per-user app data folder:
+
+- Linux: `~/.local/share/dev.questline.app/`
+- Windows: `%APPDATA%\dev.questline.app\`
+
+Dev and release builds share it.
 Set `QUESTLINE_DATA_DIR` to store it elsewhere.
+Linux and Windows each keep their own progress.
+
+Earlier builds saved to `data/questline.json` inside this folder.
+On first start, the app copies that file to the new location if there is no save there yet; the old file stays as a backup.
 
 - Saves are atomic: the app writes a temp file and renames it.
 - If the file can't be parsed, it is moved to `questline.corrupt-<timestamp>.json` instead of being overwritten.
 - When adding fields to the data model, mark them `#[serde(default)]` so old save files still load.
-- `data/` is git-ignored; back it up separately.
+- Back up the save file separately; it is not in git.
 
 ## How it plays
 
