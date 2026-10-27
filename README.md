@@ -85,8 +85,13 @@ Set `QUESTLINE_DATA_DIR` to store it elsewhere.
   Progress = (distance / target distance) × min(1, target pace / your pace).
   For example, 3 km in 20 min counts as 54%.
   The goal is complete when a run covers the distance at or below the target pace.
-- **XP and levels**: every update earns XP, scaled by how much progress it made.
+- **XP and levels**: every run earns XP, and a counter update earns XP when it takes the goal above its previous best.
+  The amount scales with how much new progress it made.
   Each update has a 10% chance of double XP.
+- **Undo, archive and delete**: ↶ undoes a goal's last update and takes back everything it earned, including milestones, completion and quests.
+  🗄 archives a goal: it leaves the board but keeps its XP, and can be restored from the Archive section.
+  ✕ deletes a goal and takes back all the XP it earned.
+  Badges stay once unlocked.
 - **Milestones** at 25 / 50 / 75% give bonus XP, and reaching 100% triggers a celebration.
 - **Pace rival** (goals with a deadline): a 🏁 marker on the bar shows where you should be today.
 - **Ghost**: this week vs. last week at the same moment, per goal and for total XP.

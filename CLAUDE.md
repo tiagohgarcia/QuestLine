@@ -7,14 +7,16 @@ See `README.md` for setup, build commands and the game rules as the user sees th
 ## Status
 
 v1 is built and runs: counter and performance goals, categories, XP/levels, milestones, pace rival, ghost, weekly quests, streaks, badges and the Trophy Room.
+Undo, archive and XP revocation on delete were added afterwards; they compile but have not been clicked through yet.
 It compiles cleanly, and the release binary is used daily through a desktop launcher.
-There are no automated tests yet.
+Unit tests cover `model.rs`, `game.rs`, `view.rs` and `storage.rs` (`cargo test` in `src-tauri/`); `main.rs` commands and the frontend have none.
 Manual testing so far covered launching and creating a goal; the XP, celebration, quest and badge flows have not been clicked through end to end.
 
 ## Architecture
 
 - `model.rs`: persisted types (`Store`, `Goal`, `Entry`, `Profile`, `Quest`) and progress math (`run_score`, `Goal::progress`).
 - `game.rs`: all game rules. `apply_entry` is the single path for progress updates: it records the entry, then awards XP, milestones, completion, personal bests, quests and badges, and returns `GameEvent`s.
+  Every award is tagged with the `EntryRef` that caused it; `undo_last_entry` and `delete_goal` take tagged XP back through `revoke_xp`.
 - `view.rs`: builds the read-only `AppView` snapshot sent to the UI. Derived values (ghost, rival, quest progress) are computed here, not stored.
 - `storage.rs`: JSON load/save with atomic writes.
 - `main.rs`: Tauri commands. Every command goes through `mutate()`, which locks the store, applies the change, refreshes quests, saves, and returns `{ view, events }`.
@@ -37,32 +39,23 @@ Manual testing so far covered launching and creating a goal; the XP, celebration
 - The first build takes a few minutes; ask the user before running `npm run dev` or a release build.
 - The desktop launchers in `~/.local/share/applications/` and `~/Desktop/` point at `src-tauri/target/release/questline`.
 
+## XP rules (decided with the user)
+
+- Counter updates only earn XP above the goal's peak progress (`Goal::peak_progress`), so −1/+1 earns nothing; every run earns its base XP.
+- Undo removes the last entry and revokes its XP, milestones, completion and quest completions.
+- Deleting a goal revokes all its tagged XP. Archiving keeps the XP and hides the goal; archived goals can be restored or deleted.
+- A day stays in `active_days` only while it has XP in the log, so revoking can shorten streaks.
+- Badges are never revoked. Levels follow total XP, so they can go down.
+- XP earned before tagging existed has no `source` and is never revoked.
+- Not addressed on purpose: farming with many tiny completed goals that are kept.
+
 ## Future work
-
-### XP exploits and mistakes (reported by the user)
-
-XP is an append-only log (`Profile.xp_log`) that is never revoked, which causes two problems:
-
-1. **Create-and-delete farming.**
-   Create a goal with a target of 1, click +1, delete it, and repeat.
-   Each cycle earns the update XP plus the 300 XP completion bonus, and deleting the goal keeps the XP.
-   A smaller version: alternating −1 and +1 earns the 10 XP base reward on every +1.
-2. **Mistakes can't be undone.**
-   If the user adds progress by accident, −1 or "Set total" corrects the number, but the XP, milestones, completion and quest rewards stay.
-
-Possible directions:
-- Link each XP award to the entry that caused it, so undoing an entry (or deleting a goal) revokes its XP.
-- Add a real "undo last update" action instead of relying on negative deltas.
-- Only reward progress above a goal's previous best, so going down and back up earns nothing.
-- Scale or delay the completion bonus, e.g. by target size or minimum goal age, so tiny goals aren't worth farming.
-
-Revoking XP can also undo level-ups and badges, so decide how to handle those.
 
 ### Other ideas discussed but not built
 
 - Seasons: monthly XP compared against your own past seasons.
 - Unlockable rewards: color themes, titles and profile icons by level.
 - Streak freezes earned through consistency.
-- Editing a goal (name, target, deadline); currently it can only be deleted.
+- Editing a goal (name, target, deadline); currently it can only be archived or deleted.
 - A history view or chart of entries per goal.
-- Unit tests for `game.rs` and `model.rs` (progress math, levels, streaks, quests).
+- Tests for the Tauri commands in `main.rs` (goal creation validation, `set_progress`).

@@ -7,6 +7,7 @@ const state = {
   tab: 'goals',
   filter: 'All',
   kind: 'counter',
+  archiveOpen: false,
   // Last rendered width of each bar, so re-renders animate from the old value.
   shown: new Map(),
 };
@@ -126,8 +127,43 @@ function goalsHtml(v) {
         <button class="btn primary" data-action="new-goal">＋ New goal</button>
       </div>`;
   return `<div class="toolbar"><div class="chips">${chips}</div>
-    <button class="btn primary" data-action="new-goal">＋ New goal</button></div>${body}`;
+    <button class="btn primary" data-action="new-goal">＋ New goal</button></div>${body}${archiveHtml(v)}`;
 }
+
+function archiveHtml(v) {
+  if (!v.archived.length) return '';
+  const rows = state.archiveOpen ? `<div class="archive-list">${v.archived.map(archivedRow).join('')}</div>` : '';
+  return `<h2 class="section-title"><button class="archive-toggle" data-action="toggle-archive">
+      ${state.archiveOpen ? '▾' : '▸'} Archive <span class="muted">${v.archived.length}</span></button></h2>${rows}`;
+}
+
+function archivedRow(g) {
+  const status = g.completed_at
+    ? `🏆 Completed ${new Date(g.completed_at).toLocaleDateString()}`
+    : `Incomplete · ${pct(g.progress)}%`;
+  const xp = g.xp_earned ? ` · ${fmt(g.xp_earned)} XP earned` : '';
+  return `<article class="card archived">
+    <div><h3>${esc(g.name)}</h3><p class="muted small">${esc(g.category)} · ${status}${xp}</p></div>
+    <div class="icon-btns">
+      <button class="btn small" data-action="restore" data-id="${g.id}">Restore</button>${deleteButton(g)}
+    </div>
+  </article>`;
+}
+
+function goalButtons(g) {
+  const undo =
+    g.undo_xp == null
+      ? ''
+      : `<button class="icon-btn" data-action="undo" data-id="${g.id}" data-xp="${g.undo_xp}"
+          title="Undo last update${g.undo_xp ? ` (−${fmt(g.undo_xp)} XP)` : ''}">↶</button>`;
+  return `<div class="icon-btns">${undo}
+    <button class="icon-btn" data-action="archive" data-id="${g.id}" title="Archive: hide this goal and keep its XP">🗄</button>
+    ${deleteButton(g)}</div>`;
+}
+
+const deleteButton = (g) =>
+  `<button class="icon-btn" data-action="delete" data-id="${g.id}" data-xp="${g.xp_earned}"
+    title="Delete goal${g.xp_earned ? ` and lose ${fmt(g.xp_earned)} XP` : ''}">✕</button>`;
 
 function goalCard(g) {
   const perf = g.kind === 'performance';
@@ -147,7 +183,7 @@ function goalCard(g) {
   return `<article class="card goal" style="--hue:${hue(g.category)}">
     <div class="goal-head">
       <span class="chip">${esc(g.category)}</span>
-      <button class="icon-btn" data-action="delete" data-id="${g.id}" title="Delete goal">✕</button>
+      ${goalButtons(g)}
     </div>
     <h3>${esc(g.name)}</h3>
     <div class="goal-stats"><span class="big">${pct(g.progress)}<small>%</small></span><span class="muted">${status}</span></div>
@@ -182,7 +218,7 @@ function ghostTag(g) {
 
 function counterActions(g) {
   return `<div class="actions">
-    <button class="btn small" data-action="add" data-id="${g.id}" data-delta="-1" title="Undo one">−1</button>
+    <button class="btn small" data-action="add" data-id="${g.id}" data-delta="-1" title="Subtract one">−1</button>
     <button class="btn small accent" data-action="add" data-id="${g.id}" data-delta="1">+1</button>
     <button class="btn small accent" data-action="add" data-id="${g.id}" data-delta="5">+5</button>
     <input class="amount" type="number" step="any" placeholder="Amount" />
@@ -251,6 +287,7 @@ function trophiesHtml(v) {
               <p class="muted small">${esc(g.category)} · ${result}</p>
               <p class="small">Completed ${new Date(g.completed_at).toLocaleDateString()} · ${took}</p>
             </div>
+            <div class="trophy-actions">${goalButtons(g)}</div>
           </article>`;
         })
         .join('')
@@ -295,6 +332,9 @@ function playEvents(events) {
         break;
       case 'level_up':
         celebrate('⭐', `Level ${e.level}!`, `You are now a <b>${esc(e.title)}</b>`);
+        break;
+      case 'xp_revoked':
+        toast(`↶ ${esc(e.reason)}${e.amount ? `<span class="xp">−${fmt(e.amount)} XP</span>` : ''}`);
         break;
     }
   }
@@ -402,19 +442,19 @@ function shake(el) {
   el.focus();
 }
 
-function armDelete(el, id) {
-  if (el.dataset.armed) {
-    call('delete_goal', { id });
-    return;
-  }
+/** Undo and delete can't be reversed, so they need a second click within 3 seconds. */
+function confirmClick(el, verb, onConfirm) {
+  if (el.dataset.armed) return onConfirm();
+  const original = el.textContent;
+  const xp = Number(el.dataset.xp);
   el.dataset.armed = '1';
   el.classList.add('armed');
-  el.textContent = 'Delete?';
+  el.textContent = xp ? `${verb}? −${fmt(xp)} XP` : `${verb}?`;
   setTimeout(() => {
     if (!el.isConnected) return;
     delete el.dataset.armed;
     el.classList.remove('armed');
-    el.textContent = '✕';
+    el.textContent = original;
   }, 3000);
 }
 
@@ -488,8 +528,17 @@ document.addEventListener('click', (e) => {
     }
     case 'log-run':
       return logRun(el, id);
+    case 'undo':
+      return confirmClick(el, 'Undo', () => call('undo_entry', { id }));
     case 'delete':
-      return armDelete(el, id);
+      return confirmClick(el, 'Delete', () => call('delete_goal', { id }));
+    case 'archive':
+      return call('archive_goal', { id });
+    case 'restore':
+      return call('restore_goal', { id });
+    case 'toggle-archive':
+      state.archiveOpen = !state.archiveOpen;
+      return render();
   }
 });
 

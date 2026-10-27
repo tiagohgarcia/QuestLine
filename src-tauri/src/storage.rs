@@ -36,3 +36,80 @@ pub fn save(path: &Path, store: &Store) -> Result<(), String> {
     fs::write(&tmp, json).map_err(|e| e.to_string())?;
     fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Goal, GoalKind};
+
+    /// A fresh, empty folder per test under the system temp dir.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("questline-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn sample() -> Store {
+        let mut store = Store::default();
+        store.next_id = 2;
+        store.profile.xp = 42;
+        store.goals.push(Goal {
+            id: 1,
+            name: "Read".into(),
+            category: "Books".into(),
+            kind: GoalKind::Counter { target: 12.0, unit: "books".into() },
+            created_at: chrono::Utc::now(),
+            deadline: None,
+            baseline: 3.0,
+            entries: Vec::new(),
+            completed_at: None,
+            milestones_hit: vec![25],
+            next_entry_id: 0,
+            archived_at: None,
+        });
+        store
+    }
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let dir = scratch("round-trip");
+        let path = dir.join("nested").join("questline.json");
+        save(&path, &sample()).unwrap();
+        let loaded = load(&path);
+        assert_eq!(loaded.next_id, 2);
+        assert_eq!(loaded.profile.xp, 42);
+        assert_eq!(loaded.goals[0].name, "Read");
+        assert_eq!(loaded.goals[0].milestones_hit, [25]);
+        assert!(!path.with_extension("json.tmp").exists(), "temp file is renamed away");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_file_loads_empty_store() {
+        let dir = scratch("missing");
+        let store = load(&dir.join("questline.json"));
+        assert_eq!(store.next_id, 1);
+        assert!(store.goals.is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_file_is_kept_as_backup() {
+        let dir = scratch("corrupt");
+        let path = dir.join("questline.json");
+        fs::write(&path, "{ not json").unwrap();
+
+        let store = load(&path);
+        assert!(store.goals.is_empty());
+        assert!(!path.exists());
+        let backups: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.starts_with("questline.corrupt-"))
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read_to_string(dir.join(&backups[0])).unwrap(), "{ not json");
+        fs::remove_dir_all(dir).unwrap();
+    }
+}

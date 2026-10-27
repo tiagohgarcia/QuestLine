@@ -103,6 +103,8 @@ fn create_goal(state: State<'_, AppState>, input: NewGoal) -> Result<Response, S
             entries: Vec::new(),
             completed_at: None,
             milestones_hit: Vec::new(),
+            next_entry_id: 0,
+            archived_at: None,
         };
         // Progress you already had doesn't pay out milestone XP.
         let reached = goal.progress() * 100.0;
@@ -147,11 +149,31 @@ fn log_run(state: State<'_, AppState>, id: u64, distance: f64, minutes: f64) -> 
 }
 
 #[tauri::command]
-fn delete_goal(state: State<'_, AppState>, id: u64) -> Result<Response, String> {
-    mutate(&state, |store, _| {
-        store.goals.retain(|g| g.id != id);
+fn undo_entry(state: State<'_, AppState>, id: u64) -> Result<Response, String> {
+    mutate(&state, |store, _| game::undo_last_entry(store, id))
+}
+
+#[tauri::command]
+fn archive_goal(state: State<'_, AppState>, id: u64) -> Result<Response, String> {
+    mutate(&state, |store, now| {
+        let goal = store.goals.iter_mut().find(|g| g.id == id).ok_or("Goal not found")?;
+        goal.archived_at = Some(now);
         Ok(Vec::new())
     })
+}
+
+#[tauri::command]
+fn restore_goal(state: State<'_, AppState>, id: u64) -> Result<Response, String> {
+    mutate(&state, |store, _| {
+        let goal = store.goals.iter_mut().find(|g| g.id == id).ok_or("Goal not found")?;
+        goal.archived_at = None;
+        Ok(Vec::new())
+    })
+}
+
+#[tauri::command]
+fn delete_goal(state: State<'_, AppState>, id: u64) -> Result<Response, String> {
+    mutate(&state, |store, _| game::delete_goal(store, id))
 }
 
 fn main() {
@@ -165,6 +187,9 @@ fn main() {
             add_progress,
             set_progress,
             log_run,
+            undo_entry,
+            archive_goal,
+            restore_goal,
             delete_goal
         ])
         .run(tauri::generate_context!())
