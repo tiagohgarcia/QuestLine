@@ -9,6 +9,16 @@ pub enum GoalKind {
     Counter { target: f64, unit: String },
     /// Cover a distance within a time, e.g. 5 km in 30 min.
     Performance { distance_km: f64, time_min: f64 },
+    /// Focus a number of hours every week or month, measured by the focus timer.
+    Focus { hours: f64, period: Period },
+}
+
+/// How often a focus goal starts over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Period {
+    Week,
+    Month,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,13 +89,15 @@ impl Goal {
                     EntryData::Count { .. } => 0.0,
                 })
                 .fold(0.0, f64::max),
+            // Focus time lives in `Store::focus`, not in goal entries.
+            GoalKind::Focus { .. } => 0.0,
         }
     }
 
     pub fn current(&self) -> f64 {
         match self.kind {
             GoalKind::Counter { .. } => self.baseline + self.amount_between(None, None),
-            GoalKind::Performance { .. } => self.amount_between(None, None),
+            GoalKind::Performance { .. } | GoalKind::Focus { .. } => self.amount_between(None, None),
         }
     }
 
@@ -94,6 +106,7 @@ impl Goal {
         match self.kind {
             GoalKind::Counter { target, .. } => (self.current() / target).clamp(0.0, 1.0),
             GoalKind::Performance { .. } => self.current().clamp(0.0, 1.0),
+            GoalKind::Focus { .. } => 0.0,
         }
     }
 
@@ -127,7 +140,7 @@ impl Goal {
                 (peak / target).clamp(0.0, 1.0)
             }
             // The best run never goes down.
-            GoalKind::Performance { .. } => self.progress(),
+            GoalKind::Performance { .. } | GoalKind::Focus { .. } => self.progress(),
         }
     }
 
@@ -165,7 +178,34 @@ pub struct XpEvent {
     pub reason: String,
     /// Missing for XP earned before awards were linked to entries; that XP is never revoked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<EntryRef>,
+    pub source: Option<XpSource>,
+}
+
+/// What caused an XP award. Untagged so saves from before focus time keep loading:
+/// a plain `{goal_id, entry_id}` is still a goal entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum XpSource {
+    Entry(EntryRef),
+    /// A focus goal reached its target in the period starting on `period_start`.
+    FocusGoal { goal_id: u64, period_start: NaiveDate },
+    Focus { focus_session: u64 },
+}
+
+impl XpSource {
+    pub fn goal_id(&self) -> Option<u64> {
+        match *self {
+            XpSource::Entry(r) => Some(r.goal_id),
+            XpSource::FocusGoal { goal_id, .. } => Some(goal_id),
+            XpSource::Focus { .. } => None,
+        }
+    }
+}
+
+impl From<EntryRef> for XpSource {
+    fn from(r: EntryRef) -> Self {
+        XpSource::Entry(r)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,7 +229,7 @@ pub struct Quest {
     pub xp: u64,
     pub completed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completed_by: Option<EntryRef>,
+    pub completed_by: Option<XpSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,11 +257,51 @@ pub struct Store {
     pub next_id: u64,
     pub goals: Vec<Goal>,
     pub profile: Profile,
+    pub focus: Focus,
 }
 
 impl Default for Store {
     fn default() -> Self {
-        Self { next_id: 1, goals: Vec::new(), profile: Profile::default() }
+        Self { next_id: 1, goals: Vec::new(), profile: Profile::default(), focus: Focus::default() }
+    }
+}
+
+/// One stretch of focus between pressing start and pause.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FocusSession {
+    pub id: u64,
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+}
+
+impl FocusSession {
+    pub fn seconds(&self) -> i64 {
+        (self.end - self.start).num_seconds().max(0)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Focus {
+    /// Finished sessions, oldest first.
+    pub sessions: Vec<FocusSession>,
+    /// When the timer was started, while it is running.
+    pub running_since: Option<DateTime<Utc>>,
+    /// Id of the last session added; the next one gets this plus one.
+    pub next_id: u64,
+}
+
+impl Focus {
+    /// Focused seconds within [from, until). Sessions are clipped to the window.
+    /// With `now`, the running session counts up to `now`.
+    pub fn seconds_between(&self, from: DateTime<Utc>, until: DateTime<Utc>, now: Option<DateTime<Utc>>) -> i64 {
+        let running = now.zip(self.running_since).map(|(now, start)| (start, now));
+        self.sessions
+            .iter()
+            .map(|s| (s.start, s.end))
+            .chain(running)
+            .map(|(start, end)| (end.min(until) - start.max(from)).num_seconds().max(0))
+            .sum()
     }
 }
 
@@ -378,6 +458,29 @@ mod tests {
         assert!(g.milestones_hit.is_empty());
         assert!(store.profile.xp_log[0].source.is_none());
         assert!(store.profile.quests.unwrap().quests[0].completed_by.is_none());
+    }
+
+    #[test]
+    fn save_files_without_focus_load_with_timer_stopped() {
+        let store: Store = serde_json::from_str(r#"{"next_id": 1, "goals": [], "profile": {}}"#).unwrap();
+        assert!(store.focus.sessions.is_empty());
+        assert!(store.focus.running_since.is_none());
+    }
+
+    #[test]
+    fn xp_sources_round_trip_and_old_entry_refs_still_load() {
+        let old: XpSource = serde_json::from_str(r#"{"goal_id": 3, "entry_id": 7}"#).unwrap();
+        assert_eq!(old, XpSource::Entry(EntryRef { goal_id: 3, entry_id: 7 }));
+        let sources = [
+            XpSource::Entry(EntryRef { goal_id: 1, entry_id: 2 }),
+            XpSource::FocusGoal { goal_id: 4, period_start: NaiveDate::from_ymd_opt(2026, 10, 12).unwrap() },
+            XpSource::Focus { focus_session: 9 },
+        ];
+        for source in sources {
+            let json = serde_json::to_string(&source).unwrap();
+            assert_eq!(serde_json::from_str::<XpSource>(&json).unwrap(), source, "{json}");
+        }
+        assert_eq!(sources.map(|s| s.goal_id()), [Some(1), Some(4), None]);
     }
 
     #[test]

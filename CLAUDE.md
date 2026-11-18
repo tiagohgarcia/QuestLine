@@ -8,15 +8,18 @@ See `README.md` for setup, build commands and the game rules as the user sees th
 
 v1 is built and runs: counter and performance goals, categories, XP/levels, milestones, pace rival, ghost, weekly quests, streaks, badges and the Trophy Room.
 Undo, archive and XP revocation on delete were added afterwards; they compile but have not been clicked through yet.
-It compiles cleanly, and the release binary is used daily through a desktop launcher.
-Unit tests cover `model.rs`, `game.rs`, `view.rs` and `storage.rs` (`cargo test` in `src-tauri/`); `main.rs` commands and the frontend have none.
+The focus timer (Focus tab, sessions, week/month/year overview, weekly/monthly focus goals) was added last and has not been run yet.
+The release binary (built before the focus timer) is used daily through a desktop launcher.
+Unit tests cover `model.rs`, `game.rs`, `focus.rs`, `view.rs` and `storage.rs` (`cargo test` in `src-tauri/`); `main.rs` commands and the frontend have none.
 Manual testing so far covered launching and creating a goal; the XP, celebration, quest and badge flows have not been clicked through end to end.
 
 ## Architecture
 
 - `model.rs`: persisted types (`Store`, `Goal`, `Entry`, `Profile`, `Quest`) and progress math (`run_score`, `Goal::progress`).
 - `game.rs`: all game rules. `apply_entry` is the single path for progress updates: it records the entry, then awards XP, milestones, completion, personal bests, quests and badges, and returns `GameEvent`s.
-  Every award is tagged with the `EntryRef` that caused it; `undo_last_entry` and `delete_goal` take tagged XP back through `revoke_xp`.
+  Every award is tagged with the `XpSource` that caused it (a goal entry, a focus session, or a focus goal's period); `undo_last_entry` and `delete_goal` take tagged XP back through `revoke_xp`.
+- `focus.rs`: focus timer rules. Sessions live in `Store::focus`, not in goal entries.
+  `sync_goals` makes focus goal rewards match the sessions after every change, awarding or revoking per period.
 - `view.rs`: builds the read-only `AppView` snapshot sent to the UI. Derived values (ghost, rival, quest progress) are computed here, not stored.
 - `storage.rs`: JSON load/save with atomic writes, and the save file's location.
 - `main.rs`: Tauri commands. Every command goes through `mutate()`, which locks the store, applies the change, refreshes quests, saves, and returns `{ view, events }`.
@@ -51,6 +54,10 @@ Manual testing so far covered launching and creating a goal; the XP, celebration
 - Badges are never revoked. Levels follow total XP, so they can go down.
 - XP earned before tagging existed has no `source` and is never revoked.
 - Not addressed on purpose: farming with many tiny completed goals that are kept.
+- Focus: 10 XP per full 25 minutes of a session, paid at pause and dated at the session's end (so its day joins the streak).
+  Sessions under 5 seconds are dropped as accidental clicks. The running session earns nothing until paused.
+- Focus goals (`GoalKind::Focus`) start over every week or month, never complete, and have no deadline or quests.
+  Each period that reaches the target pays once (150 XP week, 400 XP month); editing or deleting sessions below the target revokes it.
 
 ## Future work
 

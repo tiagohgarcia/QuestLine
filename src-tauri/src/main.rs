@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod focus;
 mod game;
 mod model;
 mod storage;
@@ -7,7 +8,7 @@ mod view;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use game::GameEvent;
-use model::{EntryData, Goal, GoalKind, Store};
+use model::{EntryData, Goal, GoalKind, Period, Store};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -36,6 +37,14 @@ struct NewGoal {
     time_min: Option<f64>,
     deadline: Option<String>,
     start_value: Option<f64>,
+    hours: Option<f64>,
+    period: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SessionTimes {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
 }
 
 fn mutate(
@@ -75,9 +84,19 @@ fn create_goal(state: State<'_, AppState>, input: NewGoal) -> Result<Response, S
                 distance_km: input.distance_km.filter(|d| *d > 0.0).ok_or("Distance must be greater than 0")?,
                 time_min: input.time_min.filter(|t| *t > 0.0).ok_or("Time must be greater than 0")?,
             },
+            "focus" => GoalKind::Focus {
+                hours: input.hours.filter(|h| *h > 0.0).ok_or("Hours must be greater than 0")?,
+                period: match input.period.as_deref() {
+                    Some("week") => Period::Week,
+                    Some("month") => Period::Month,
+                    _ => return Err("Choose a week or a month".into()),
+                },
+            },
             other => return Err(format!("Unknown goal type: {other}")),
         };
         let deadline = match input.deadline.as_deref().map(str::trim) {
+            // Focus goals start over every period, so a deadline means nothing.
+            _ if matches!(kind, GoalKind::Focus { .. }) => None,
             None | Some("") => None,
             Some(s) => Some(NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| "Deadline must be YYYY-MM-DD")?),
         };
@@ -89,7 +108,7 @@ fn create_goal(state: State<'_, AppState>, input: NewGoal) -> Result<Response, S
                 }
                 start
             }
-            GoalKind::Performance { .. } => 0.0,
+            GoalKind::Performance { .. } | GoalKind::Focus { .. } => 0.0,
         };
 
         let mut goal = Goal {
@@ -111,7 +130,10 @@ fn create_goal(state: State<'_, AppState>, input: NewGoal) -> Result<Response, S
         goal.milestones_hit = game::MILESTONES.iter().copied().filter(|m| reached >= *m as f64).collect();
         store.next_id += 1;
         store.goals.push(goal);
-        Ok(Vec::new())
+        // Focus already done in the current week or month counts.
+        let mut events = Vec::new();
+        focus::sync_goals(store, now, &mut events);
+        Ok(events)
     })
 }
 
@@ -164,16 +186,39 @@ fn archive_goal(state: State<'_, AppState>, id: u64) -> Result<Response, String>
 
 #[tauri::command]
 fn restore_goal(state: State<'_, AppState>, id: u64) -> Result<Response, String> {
-    mutate(&state, |store, _| {
+    mutate(&state, |store, now| {
         let goal = store.goals.iter_mut().find(|g| g.id == id).ok_or("Goal not found")?;
         goal.archived_at = None;
-        Ok(Vec::new())
+        // Sessions may have changed while it was archived.
+        let mut events = Vec::new();
+        focus::sync_goals(store, now, &mut events);
+        Ok(events)
     })
 }
 
 #[tauri::command]
 fn delete_goal(state: State<'_, AppState>, id: u64) -> Result<Response, String> {
     mutate(&state, |store, _| game::delete_goal(store, id))
+}
+
+#[tauri::command]
+fn focus_start(state: State<'_, AppState>) -> Result<Response, String> {
+    mutate(&state, focus::start)
+}
+
+#[tauri::command]
+fn focus_pause(state: State<'_, AppState>) -> Result<Response, String> {
+    mutate(&state, focus::pause)
+}
+
+#[tauri::command]
+fn focus_edit_session(state: State<'_, AppState>, id: u64, input: SessionTimes) -> Result<Response, String> {
+    mutate(&state, |store, now| focus::edit_session(store, id, input.start, input.end, now))
+}
+
+#[tauri::command]
+fn focus_delete_session(state: State<'_, AppState>, id: u64) -> Result<Response, String> {
+    mutate(&state, |store, now| focus::delete_session(store, id, now))
 }
 
 fn main() {
@@ -193,7 +238,11 @@ fn main() {
             undo_entry,
             archive_goal,
             restore_goal,
-            delete_goal
+            delete_goal,
+            focus_start,
+            focus_pause,
+            focus_edit_session,
+            focus_delete_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running Questline");

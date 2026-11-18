@@ -1,7 +1,8 @@
 //! Read-only snapshots of the store, shaped for the UI.
 
-use crate::game::{self, Week};
-use crate::model::{Entry, EntryRef, Goal, GoalKind, Profile, Store};
+use crate::focus;
+use crate::game::{self, Span};
+use crate::model::{Entry, EntryRef, Goal, GoalKind, Period, Profile, Store, XpSource};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::Serialize;
 
@@ -14,6 +15,53 @@ pub struct AppView {
     categories: Vec<String>,
     quests: QuestsView,
     badges: Vec<BadgeView>,
+    focus: FocusView,
+}
+
+/// Totals only count finished sessions; the UI adds the running one live from `running_since`.
+#[derive(Serialize)]
+struct FocusView {
+    running_since: Option<DateTime<Utc>>,
+    today_seconds: i64,
+    /// Sessions that overlap today, oldest first.
+    today: Vec<SessionView>,
+    /// Every day with focus, oldest first, for the week, month and year overviews.
+    days: Vec<DayView>,
+}
+
+#[derive(Serialize)]
+struct SessionView {
+    id: u64,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    seconds: i64,
+    xp: u64,
+}
+
+#[derive(Serialize)]
+struct DayView {
+    date: NaiveDate,
+    seconds: i64,
+}
+
+/// A focus goal's current week or month, and how the previous ones went.
+#[derive(Serialize)]
+struct FocusGoalView {
+    period: Period,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+    seconds: i64,
+    target_seconds: i64,
+    reward_xp: u64,
+    /// Up to 8 earlier periods since the goal was created, oldest first.
+    history: Vec<PeriodView>,
+}
+
+#[derive(Serialize)]
+struct PeriodView {
+    first_day: NaiveDate,
+    seconds: i64,
+    reached: bool,
 }
 
 #[derive(Serialize)]
@@ -56,6 +104,7 @@ struct GoalView {
     undo_xp: Option<u64>,
     rival: Option<RivalView>,
     ghost: GhostView,
+    focus: Option<FocusGoalView>,
     recent: Vec<Entry>,
 }
 
@@ -117,7 +166,7 @@ pub fn build(store: &Store, now: DateTime<Utc>) -> AppView {
     let mut trophies: Vec<GoalView> = Vec::new();
     let mut archived: Vec<GoalView> = Vec::new();
     for g in &store.goals {
-        let view = goal_view(g, &store.profile, now, &week);
+        let view = goal_view(g, store, now, &week);
         if g.is_archived() {
             archived.push(view)
         } else if g.is_completed() {
@@ -150,10 +199,57 @@ pub fn build(store: &Store, now: DateTime<Utc>) -> AppView {
                 unlocked_at: store.profile.badges.iter().find(|u| u.id == b.id).map(|u| u.at),
             })
             .collect(),
+        focus: focus_view(store, now),
     }
 }
 
-fn profile_view(store: &Store, now: DateTime<Utc>, week: &Week) -> ProfileView {
+fn focus_view(store: &Store, now: DateTime<Utc>) -> FocusView {
+    let today = game::local_date(now);
+    let (from, until) = (game::local_midnight(today), game::local_midnight(today + Duration::days(1)));
+    FocusView {
+        running_since: store.focus.running_since,
+        today_seconds: store.focus.seconds_between(from, until, None),
+        today: store
+            .focus
+            .sessions
+            .iter()
+            .filter(|s| s.start < until && s.end > from)
+            .map(|s| SessionView {
+                id: s.id,
+                start: s.start,
+                end: s.end,
+                seconds: s.seconds(),
+                xp: xp_from(&store.profile, |src| *src == XpSource::Focus { focus_session: s.id }),
+            })
+            .collect(),
+        days: focus::seconds_per_day(store).into_iter().map(|(date, seconds)| DayView { date, seconds }).collect(),
+    }
+}
+
+fn focus_goal_view(g: &Goal, store: &Store, now: DateTime<Utc>, hours: f64, period: Period) -> FocusGoalView {
+    let current = game::span_of(period, game::local_date(now));
+    let target_seconds = (hours * 3600.0).round() as i64;
+    let created = game::span_of(period, game::local_date(g.created_at)).first_day;
+    let mut history = Vec::new();
+    let mut span = game::span_of(period, current.first_day - Duration::days(1));
+    while history.len() < 8 && span.first_day >= created {
+        let seconds = store.focus.seconds_between(span.start, span.end, None);
+        history.push(PeriodView { first_day: span.first_day, seconds, reached: seconds >= target_seconds });
+        span = game::span_of(period, span.first_day - Duration::days(1));
+    }
+    history.reverse();
+    FocusGoalView {
+        period,
+        period_start: current.start,
+        period_end: current.end,
+        seconds: store.focus.seconds_between(current.start, current.end, None),
+        target_seconds,
+        reward_xp: focus::target_xp(period),
+        history,
+    }
+}
+
+fn profile_view(store: &Store, now: DateTime<Utc>, week: &Span) -> ProfileView {
     let p = &store.profile;
     let last_week_start = week.start - Duration::days(7);
     let (streak, best_streak) = game::streaks(&p.active_days, game::local_date(now));
@@ -173,20 +269,28 @@ fn profile_view(store: &Store, now: DateTime<Utc>, week: &Week) -> ProfileView {
     }
 }
 
-fn xp_from(profile: &Profile, matches: impl Fn(&EntryRef) -> bool) -> u64 {
+fn xp_from(profile: &Profile, matches: impl Fn(&XpSource) -> bool) -> u64 {
     profile.xp_log.iter().filter(|e| e.source.as_ref().map_or(false, &matches)).map(|e| e.amount).sum()
 }
 
-fn goal_view(g: &Goal, profile: &Profile, now: DateTime<Utc>, week: &Week) -> GoalView {
+fn goal_view(g: &Goal, store: &Store, now: DateTime<Utc>, week: &Span) -> GoalView {
+    let profile = &store.profile;
     let last_week_start = week.start - Duration::days(7);
     let (kind, unit, target, target_distance_km, target_time_min) = match &g.kind {
         GoalKind::Counter { target, unit } => ("counter", unit.clone(), *target, None, None),
         GoalKind::Performance { distance_km, time_min } => {
             ("performance", "km".to_string(), 1.0, Some(*distance_km), Some(*time_min))
         }
+        GoalKind::Focus { hours, .. } => ("focus", "h".to_string(), *hours, None, None),
     };
-    let progress = g.progress();
-    let current = g.current();
+    let focus = match g.kind {
+        GoalKind::Focus { hours, period } => Some(focus_goal_view(g, store, now, hours, period)),
+        _ => None,
+    };
+    let (progress, current) = match &focus {
+        Some(f) => ((f.seconds as f64 / f.target_seconds.max(1) as f64).min(1.0), f.seconds as f64 / 3600.0),
+        None => (g.progress(), g.current()),
+    };
     let rival = match (g.deadline, g.completed_at, g.archived_at) {
         (Some(deadline), None, None) => Some(rival_view(g, deadline, now, progress, current, target)),
         _ => None,
@@ -211,15 +315,36 @@ fn goal_view(g: &Goal, profile: &Profile, now: DateTime<Utc>, week: &Week) -> Go
             .completed_at
             .map(|c| (game::local_date(c) - game::local_date(g.created_at)).num_days()),
         archived_at: g.archived_at,
-        xp_earned: xp_from(profile, |s| s.goal_id == g.id),
-        undo_xp: g.entries.last().map(|e| xp_from(profile, |s| *s == EntryRef { goal_id: g.id, entry_id: e.id })),
+        xp_earned: xp_from(profile, |s| s.goal_id() == Some(g.id)),
+        undo_xp: g
+            .entries
+            .last()
+            .map(|e| xp_from(profile, |s| *s == XpSource::Entry(EntryRef { goal_id: g.id, entry_id: e.id }))),
         rival,
-        ghost: GhostView {
-            this_week: g.amount_between(Some(week.start), Some(week.end)),
-            by_now: g.amount_between(Some(last_week_start), Some(now - Duration::days(7))),
-            last_week: g.amount_between(Some(last_week_start), Some(week.start)),
+        ghost: match g.kind {
+            GoalKind::Focus { period, .. } => focus_ghost(store, period, now),
+            _ => GhostView {
+                this_week: g.amount_between(Some(week.start), Some(week.end)),
+                by_now: g.amount_between(Some(last_week_start), Some(now - Duration::days(7))),
+                last_week: g.amount_between(Some(last_week_start), Some(week.start)),
+            },
         },
+        focus,
         recent: g.entries.iter().rev().take(5).cloned().collect(),
+    }
+}
+
+/// Hours this period vs. the previous period at the same point. Running time counts here,
+/// since the ghost is only a comparison.
+fn focus_ghost(store: &Store, period: Period, now: DateTime<Utc>) -> GhostView {
+    let current = game::span_of(period, game::local_date(now));
+    let previous = game::span_of(period, current.first_day - Duration::days(1));
+    let hours = |from, until| store.focus.seconds_between(from, until, Some(now)) as f64 / 3600.0;
+    let same_point = (previous.start + (now - current.start)).min(previous.end);
+    GhostView {
+        this_week: hours(current.start, current.end),
+        by_now: hours(previous.start, same_point),
+        last_week: hours(previous.start, previous.end),
     }
 }
 
@@ -234,12 +359,12 @@ fn rival_view(g: &Goal, deadline: NaiveDate, now: DateTime<Utc>, progress: f64, 
             current - expected * target,
             (days_left >= 0).then(|| (target - current).max(0.0) / (days_left + 1) as f64),
         ),
-        GoalKind::Performance { .. } => ((progress - expected) * 100.0, None),
+        GoalKind::Performance { .. } | GoalKind::Focus { .. } => ((progress - expected) * 100.0, None),
     };
     RivalView { expected, ahead, days_left, per_day_needed }
 }
 
-fn quests_view(store: &Store, week: &Week) -> QuestsView {
+fn quests_view(store: &Store, week: &Span) -> QuestsView {
     let quests = store
         .profile
         .quests
@@ -297,7 +422,7 @@ mod tests {
     }
 
     fn xp(at: DateTime<Utc>, amount: u64, source: Option<(u64, u64)>) -> XpEvent {
-        XpEvent { at, amount, reason: String::new(), source: source.map(|(goal_id, entry_id)| EntryRef { goal_id, entry_id }) }
+        XpEvent { at, amount, reason: String::new(), source: source.map(|(goal_id, entry_id)| EntryRef { goal_id, entry_id }.into()) }
     }
 
     fn ids(views: &[GoalView]) -> Vec<u64> {
@@ -471,5 +596,49 @@ mod tests {
         assert_eq!(badges.len(), game::BADGES.len());
         assert_eq!(badges.iter().find(|b| b.id == "first_step").unwrap().unlocked_at, Some(local(3, 12)));
         assert!(badges.iter().filter(|b| b.id != "first_step").all(|b| b.unlocked_at.is_none()));
+    }
+
+    #[test]
+    fn focus_goal_shows_current_period_and_history() {
+        use crate::model::{FocusSession, Period};
+        let mut store = Store::default();
+        let mut g = goal(1, "Work", 0.0);
+        g.kind = GoalKind::Focus { hours: 2.0, period: Period::Week };
+        g.created_at = local(5, 8); // the week before Oct 12-18
+        store.goals.push(g);
+        store.focus.sessions = vec![
+            FocusSession { id: 1, start: local(6, 9), end: local(6, 12) },
+            FocusSession { id: 2, start: local(13, 9), end: local(13, 10) },
+        ];
+        store.focus.running_since = Some(local(14, 9));
+
+        let view = build(&store, local(14, 10));
+        let g = &view.goals[0];
+        let f = g.focus.as_ref().unwrap();
+        assert_eq!(g.kind, "focus");
+        assert_eq!(f.seconds, 3600);
+        assert!((g.progress - 0.5).abs() < 1e-9);
+        assert_eq!(f.history.len(), 1);
+        assert_eq!(f.history[0].first_day, date(5));
+        assert!(f.history[0].reached);
+        // The ghost includes the running hour.
+        assert!((g.ghost.this_week - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn focus_view_lists_todays_sessions_and_daily_totals() {
+        use crate::model::FocusSession;
+        let mut store = Store::default();
+        store.focus.sessions = vec![
+            FocusSession { id: 1, start: local(13, 9), end: local(13, 10) },
+            FocusSession { id: 2, start: local(13, 23), end: local(14, 1) },
+            FocusSession { id: 3, start: local(14, 9), end: local(14, 11) },
+        ];
+        let view = build(&store, local(14, 12));
+        let ids: Vec<u64> = view.focus.today.iter().map(|s| s.id).collect();
+        assert_eq!(ids, [2, 3]);
+        assert_eq!(view.focus.today_seconds, 3 * 3600);
+        let days: Vec<(NaiveDate, i64)> = view.focus.days.iter().map(|d| (d.date, d.seconds)).collect();
+        assert_eq!(days, [(date(13), 2 * 3600), (date(14), 3 * 3600)]);
     }
 }

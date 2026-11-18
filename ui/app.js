@@ -8,6 +8,11 @@ const state = {
   filter: 'All',
   kind: 'counter',
   archiveOpen: false,
+  // Focus overview: 'week', 'month' or 'year', around the anchor date.
+  overview: 'week',
+  anchor: new Date(),
+  // Id of the focus session being edited.
+  editing: null,
   // Last rendered width of each bar, so re-renders animate from the old value.
   shown: new Map(),
 };
@@ -40,6 +45,32 @@ function parseTime(text) {
 
 const pace = (minutes, km) => `${fmtTime(minutes / km)}/km`;
 
+/** Stopwatch style: 1:05:09. */
+function hms(secs) {
+  const s = Math.max(0, Math.floor(secs));
+  return `${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`;
+}
+
+/** "2h 05m", "25m". */
+function dur(secs) {
+  const m = Math.floor(Math.max(0, secs) / 60);
+  return m >= 60 ? `${Math.floor(m / 60)}h ${pad(m % 60)}m` : `${m}m`;
+}
+
+/** Compact, for chart labels: "45m", "3.5h". */
+const shortDur = (secs) => (secs < 3600 ? `${Math.floor(secs / 60)}m` : `${fmt1(secs / 3600)}h`);
+
+const clock = (iso) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const dayKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+const startOfDay = (d) => addDays(d, 0);
+const mondayOf = (d) => addDays(d, -((d.getDay() + 6) % 7));
+/** Value for a datetime-local input, in local time. */
+const localInput = (iso) => {
+  const d = new Date(iso);
+  return `${dayKey(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
 function hue(text) {
   let h = 0;
   for (const c of text) h = (h * 31 + c.codePointAt(0)) % 360;
@@ -69,10 +100,43 @@ function render() {
   renderPlayer(v.profile);
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === state.tab));
   $('#quest-count').textContent = v.quests.quests.filter((q) => !q.completed).length || '';
-  const pages = { goals: goalsHtml, quests: questsHtml, trophies: trophiesHtml };
+  const pages = { goals: goalsHtml, quests: questsHtml, focus: focusHtml, trophies: trophiesHtml };
   $('#main').innerHTML = pages[state.tab](v);
   animateBars();
+  tickFocus();
 }
+
+// ---------- Live focus time ----------
+
+/** Seconds of the running session that fall in [from, until), in ms timestamps. */
+function runningSecs(from = 0, until = Infinity) {
+  const since = state.view?.focus.running_since;
+  if (!since) return 0;
+  return Math.max(0, (Math.min(Date.now(), until) - Math.max(Date.parse(since), from)) / 1000);
+}
+
+/**
+ * Updates everything that grows while the timer runs, without re-rendering the page.
+ * Elements carry the finished seconds (data-base) and their time window (data-from/until).
+ */
+function tickFocus() {
+  const running = !!state.view?.focus.running_since;
+  $('#focus-chip').classList.toggle('hidden', !running || state.tab === 'focus');
+  const secs = (el) => +el.dataset.base + runningSecs(+el.dataset.from, +el.dataset.until || Infinity);
+  document.querySelectorAll('[data-live]').forEach((el) => {
+    const kind = el.dataset.live;
+    if (kind === 'session') el.textContent = hms(runningSecs());
+    else if (kind === 'total') el.textContent = dur(secs(el));
+    else if (kind === 'pct') el.textContent = Math.min(100, Math.floor((secs(el) / +el.dataset.goal) * 100));
+  });
+  document.querySelectorAll('[data-live-bar]').forEach((el) => {
+    el.style.width = `${Math.min(1, secs(el) / +el.dataset.liveBar) * 100}%`;
+  });
+}
+
+/** Attributes for a live element covering [from, until). */
+const live = (kind, base, from, until, extra = '') =>
+  `data-live="${kind}" data-base="${base}" data-from="${from}" data-until="${until}" ${extra}`;
 
 function animateBars() {
   const fills = document.querySelectorAll('.fill[data-key]');
@@ -166,6 +230,7 @@ const deleteButton = (g) =>
     title="Delete goal${g.xp_earned ? ` and lose ${fmt(g.xp_earned)} XP` : ''}">✕</button>`;
 
 function goalCard(g) {
+  if (g.kind === 'focus') return focusGoalCard(g);
   const perf = g.kind === 'performance';
   const status = perf
     ? g.best_run
@@ -194,6 +259,37 @@ function goalCard(g) {
   </article>`;
 }
 
+const periodWord = (period) => (period === 'week' ? 'week' : 'month');
+
+function focusGoalCard(g) {
+  const f = g.focus;
+  const [from, until] = [Date.parse(f.period_start), Date.parse(f.period_end)];
+  const fmtDay = (d) => new Date(`${d}T00:00`).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const history = f.history.length
+    ? `<span class="tag history" title="Earlier ${periodWord(f.period)}s">${f.history
+        .map((h) => `<span class="h ${h.reached ? 'hit' : ''}" title="${fmtDay(h.first_day)}: ${dur(h.seconds)}"></span>`)
+        .join('')}</span>`
+    : '';
+  const reached = f.seconds >= f.target_seconds;
+  return `<article class="card goal focus-goal" style="--hue:${hue(g.category)}">
+    <div class="goal-head">
+      <span class="chip">${esc(g.category)}</span>
+      ${goalButtons(g)}
+    </div>
+    <h3>${esc(g.name)}</h3>
+    <div class="goal-stats">
+      <span class="big"><span ${live('pct', f.seconds, from, until, `data-goal="${f.target_seconds}"`)}>${pct(g.progress)}</span><small>%</small></span>
+      <span class="muted"><span ${live('total', f.seconds, from, until)}></span> / ${fmt(g.target)} h this ${periodWord(f.period)}</span>
+    </div>
+    <div class="bar-wrap"><div class="bar goal-bar"><div class="fill" data-live-bar="${f.target_seconds}" data-base="${f.seconds}" data-from="${from}" data-until="${until}"></div></div></div>
+    <div class="tags">
+      <span class="tag ${reached ? 'good' : ''}">${reached ? `✓ Reached · +${f.reward_xp} XP` : `🎁 +${f.reward_xp} XP when reached`}</span>
+      ${ghostTag(g)}${history}
+    </div>
+    <div class="actions"><button class="btn small accent" data-tab="focus">⏱️ Open timer</button></div>
+  </article>`;
+}
+
 function rivalTag(g) {
   const r = g.rival;
   if (!r) return '';
@@ -212,7 +308,8 @@ function ghostTag(g) {
   }
   const winning = this_week >= by_now;
   const label = g.kind === 'performance' ? 'best run' : esc(g.unit);
-  return `<span class="tag ${winning ? 'good' : 'warn'}" title="This week vs. last week at this time. Last week total: ${show(last_week)}">
+  const last = g.kind === 'focus' ? `last ${periodWord(g.focus.period)}` : 'last week';
+  return `<span class="tag ${winning ? 'good' : 'warn'}" title="Now vs. ${last} at this time. ${last[0].toUpperCase() + last.slice(1)} total: ${show(last_week)}">
     👻 ${show(this_week)} vs ${show(by_now)} ${label}${winning ? ' ✓' : ''}</span>`;
 }
 
@@ -260,6 +357,223 @@ function questsHtml(v) {
     </div>
     <div class="quest-list">${cards || '<p class="muted">Create a goal to unlock quests.</p>'}</div>`;
 }
+
+// ---------- Focus tab ----------
+
+function focusHtml(v) {
+  const f = v.focus;
+  const running = !!f.running_since;
+  const today = startOfDay(new Date());
+  const [from, until] = [today.getTime(), addDays(today, 1).getTime()];
+  const goals = v.goals.filter((g) => g.kind === 'focus');
+  const goalBars = goals
+    .map((g) => {
+      const x = g.focus;
+      const [gFrom, gUntil] = [Date.parse(x.period_start), Date.parse(x.period_end)];
+      return `<div class="timer-goal ${x.seconds >= x.target_seconds ? 'reached' : ''}">
+        <div class="timer-goal-top"><span>${esc(g.name)}</span>
+          <span><b ${live('total', x.seconds, gFrom, gUntil)}></b> / ${fmt(g.target)}h this ${periodWord(x.period)}</span></div>
+        <div class="bar"><div class="fill" data-live-bar="${x.target_seconds}" data-base="${x.seconds}" data-from="${gFrom}" data-until="${gUntil}"></div></div>
+      </div>`;
+    })
+    .join('');
+  const hint = goals.length
+    ? ''
+    : `<p class="muted small">Tip: create a ⏱️ Focus goal, like 30 hours a week, to track a target here.</p>`;
+
+  return `<div class="focus-layout">
+    <section class="card timer-card ${running ? 'running' : ''}">
+      <div class="timer-label">${running ? 'Focusing' : 'Focus time'}</div>
+      <div class="timer" data-live="session">0:00:00</div>
+      <button class="btn primary timer-btn ${running ? 'pause' : ''}" data-action="toggle-timer">${running ? '⏸ Pause' : '▶ Start'}</button>
+      <div class="timer-sub">
+        <span>Today <b ${live('total', f.today_seconds, from, until)}></b></span>
+        <span>🔥 <b>${v.profile.streak}</b> day streak</span>
+        <span>+10 XP every 25 min</span>
+      </div>
+      ${goalBars ? `<div class="timer-goals">${goalBars}</div>` : ''}
+      ${hint}
+    </section>
+    <section class="card">
+      <h2 class="section-title" style="margin-top:0">Today's sessions</h2>
+      ${sessionsHtml(f, running)}
+    </section>
+    <section class="card">${overviewHtml(f)}</section>
+  </div>`;
+}
+
+function sessionsHtml(f, running) {
+  const today = dayKey(new Date());
+  const when = (iso) => (dayKey(new Date(iso)) === today ? clock(iso) : `${new Date(iso).toLocaleDateString([], { weekday: 'short' })} ${clock(iso)}`);
+  const rows = f.today.map((s) =>
+    state.editing === s.id
+      ? `<div class="session-edit" data-id="${s.id}">
+          <input type="datetime-local" class="edit-start" value="${localInput(s.start)}" data-orig="${localInput(s.start)}" data-iso="${s.start}" />
+          <span class="muted">to</span>
+          <input type="datetime-local" class="edit-end" value="${localInput(s.end)}" data-orig="${localInput(s.end)}" data-iso="${s.end}" />
+          <button class="btn small accent" data-action="save-session" data-id="${s.id}">Save</button>
+          <button class="btn small ghost" data-action="cancel-edit">Cancel</button>
+        </div>`
+      : `<div class="session">
+          <span class="when">${when(s.start)} – ${when(s.end)}</span>
+          <span class="len">${dur(s.seconds)}</span>
+          ${s.xp ? `<span class="xp">+${s.xp} XP</span>` : ''}
+          <div class="icon-btns">
+            <button class="icon-btn" data-action="edit-session" data-id="${s.id}" title="Edit times">✏️</button>
+            <button class="icon-btn" data-action="delete-session" data-id="${s.id}" data-xp="${s.xp}"
+              title="Delete session${s.xp ? ` and lose ${s.xp} XP` : ''}">✕</button>
+          </div>
+        </div>`,
+  );
+  if (running) {
+    rows.push(`<div class="session live">
+      <span class="when">${when(f.running_since)} – now</span><span class="len" data-live="session"></span></div>`);
+  }
+  return rows.length
+    ? `<div class="sessions">${rows.join('')}</div>`
+    : '<p class="muted">No sessions yet today. Press Start (or Space) when you begin working.</p>';
+}
+
+/** Seconds per local day ("YYYY-MM-DD"), including the running session up to now. */
+function focusDays(f) {
+  const days = new Map(f.days.map((d) => [d.date, d.seconds]));
+  if (f.running_since) {
+    for (let d = startOfDay(new Date(f.running_since)); d <= new Date(); d = addDays(d, 1)) {
+      const secs = runningSecs(d.getTime(), addDays(d, 1).getTime());
+      days.set(dayKey(d), (days.get(dayKey(d)) ?? 0) + secs);
+    }
+  }
+  return days;
+}
+
+/** The overview's date range and title: [first day, day after the last, title]. */
+function overviewRange() {
+  const a = state.anchor;
+  if (state.overview === 'week') {
+    const first = mondayOf(a);
+    const last = addDays(first, 6);
+    const opts = { month: 'short', day: 'numeric' };
+    return [first, addDays(first, 7), `${first.toLocaleDateString([], opts)} – ${last.toLocaleDateString([], opts)}, ${last.getFullYear()}`];
+  }
+  if (state.overview === 'month') {
+    const first = new Date(a.getFullYear(), a.getMonth(), 1);
+    return [first, new Date(a.getFullYear(), a.getMonth() + 1, 1), first.toLocaleDateString([], { month: 'long', year: 'numeric' })];
+  }
+  return [new Date(a.getFullYear(), 0, 1), new Date(a.getFullYear() + 1, 0, 1), String(a.getFullYear())];
+}
+
+function overviewHtml(f) {
+  const days = focusDays(f);
+  const secsOn = (d) => days.get(dayKey(d)) ?? 0;
+  const [first, end, title] = overviewRange();
+  const now = new Date();
+  const isCurrent = first <= now && now < end;
+  const todayKey = dayKey(now);
+
+  let total = 0;
+  for (let d = first; d < end; d = addDays(d, 1)) total += secsOn(d);
+  const elapsedDays = Math.max(1, Math.round((Math.min(now, end) - first) / 86400000));
+  const average = first > now ? 0 : total / elapsedDays;
+
+  let chart;
+  if (state.overview === 'week') {
+    const cols = [...Array(7)].map((_, i) => {
+      const d = addDays(first, i);
+      return { secs: secsOn(d), label: d.toLocaleDateString([], { weekday: 'short' }), today: dayKey(d) === todayKey };
+    });
+    chart = barsHtml(cols);
+  } else if (state.overview === 'year') {
+    const cols = [...Array(12)].map((_, m) => {
+      let secs = 0;
+      for (let d = new Date(first.getFullYear(), m, 1); d.getMonth() === m; d = addDays(d, 1)) secs += secsOn(d);
+      const month = new Date(first.getFullYear(), m, 1);
+      return { secs, label: month.toLocaleDateString([], { month: 'short' }), today: month.getMonth() === now.getMonth() && month.getFullYear() === now.getFullYear() };
+    });
+    chart = barsHtml(cols);
+  } else {
+    chart = calendarHtml(first, end, secsOn, now);
+  }
+
+  const modes = ['week', 'month', 'year']
+    .map((m) => `<button class="${state.overview === m ? 'on' : ''}" data-action="overview-mode" data-mode="${m}">${m[0].toUpperCase() + m.slice(1)}</button>`)
+    .join('');
+  return `<div class="overview-head">
+      <h2>Overview</h2>
+      <div class="seg-small">${modes}</div>
+      <div class="overview-nav">
+        <button class="btn small ghost" data-action="overview-shift" data-step="-1" title="Previous">◀</button>
+        <b>${esc(title)}</b>
+        <button class="btn small ghost" data-action="overview-shift" data-step="1" title="Next" ${isCurrent || first > now ? 'disabled' : ''}>▶</button>
+        ${isCurrent ? '' : '<button class="btn small ghost" data-action="overview-today">Today</button>'}
+      </div>
+    </div>
+    <div class="overview-total">
+      <div><span class="muted small">Total</span><b>${dur(total)}</b></div>
+      <div><span class="muted small">Daily average</span><b>${dur(average)}</b></div>
+    </div>
+    ${chart}`;
+}
+
+function barsHtml(cols) {
+  const max = Math.max(3600, ...cols.map((c) => c.secs));
+  return `<div class="bars">${cols
+    .map(
+      (c) => `<div class="bar-col ${c.secs ? '' : 'empty'} ${c.today ? 'today' : ''}" title="${esc(c.label)}: ${dur(c.secs)}">
+        <span class="val">${c.secs ? shortDur(c.secs) : ''}</span>
+        <div class="col" style="height:${(c.secs / max) * 100}%"></div>
+        <span class="lbl">${esc(c.label)}</span>
+      </div>`,
+    )
+    .join('')}</div>`;
+}
+
+function calendarHtml(first, end, secsOn, now) {
+  const today = dayKey(now);
+  const dows = [...Array(7)].map((_, i) => `<div class="dow">${addDays(mondayOf(now), i).toLocaleDateString([], { weekday: 'short' })}</div>`);
+  const blanks = [...Array((first.getDay() + 6) % 7)].map(() => '<div class="cal-day blank"></div>');
+  const cells = [];
+  let max = 3600;
+  for (let d = first; d < end; d = addDays(d, 1)) max = Math.max(max, secsOn(d));
+  for (let d = first; d < end; d = addDays(d, 1)) {
+    const secs = secsOn(d);
+    const cls = dayKey(d) === today ? 'today' : d > now ? 'future' : '';
+    cells.push(`<div class="cal-day ${cls}" style="--level:${secs / max}" title="${d.toLocaleDateString()}: ${dur(secs)}">
+      <span class="muted">${d.getDate()}</span><b>${secs ? shortDur(secs) : ''}</b></div>`);
+  }
+  return `<div class="calendar">${[...dows, ...blanks, ...cells].join('')}</div>`;
+}
+
+function shiftAnchor(step) {
+  const a = state.anchor;
+  state.anchor =
+    state.overview === 'week'
+      ? addDays(a, 7 * step)
+      : state.overview === 'month'
+        ? new Date(a.getFullYear(), a.getMonth() + step, 1)
+        : new Date(a.getFullYear() + step, 0, 1);
+}
+
+function saveSession(el, id) {
+  const row = el.closest('.session-edit');
+  const value = (cls) => {
+    const input = row.querySelector(cls);
+    // Unchanged fields keep their seconds.
+    if (input.value === input.dataset.orig) return input.dataset.iso;
+    const date = new Date(input.value);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  };
+  const [start, end] = [value('.edit-start'), value('.edit-end')];
+  if (!start) return shake(row.querySelector('.edit-start'));
+  if (!end) return shake(row.querySelector('.edit-end'));
+  call('focus_edit_session', { id, input: { start, end } }).then((ok) => {
+    if (ok) {
+      state.editing = null;
+      render();
+    }
+  });
+}
+
+const toggleTimer = () => call(state.view.focus.running_since ? 'focus_pause' : 'focus_start');
 
 function trophiesHtml(v) {
   const p = v.profile;
@@ -326,6 +640,9 @@ function playEvents(events) {
         break;
       case 'badge_unlocked':
         toast(`${e.icon} <b>Badge unlocked:</b> ${esc(e.name)}`, 'gold');
+        break;
+      case 'focus_target_reached':
+        celebrate('⏱️', `${e.period === 'week' ? 'Weekly' : 'Monthly'} target reached!`, `${esc(e.goal)} · +${e.xp} XP`);
         break;
       case 'goal_completed':
         celebrate('🏆', 'Goal complete!', `${esc(e.goal)} · +${e.xp} XP`);
@@ -473,6 +790,8 @@ function setKind(kind) {
   state.kind = kind;
   document.querySelectorAll('#kind-toggle button').forEach((b) => b.classList.toggle('on', b.dataset.kind === kind));
   document.querySelectorAll('.kind-fields').forEach((f) => f.classList.toggle('hidden', f.dataset.for !== kind));
+  // Focus goals start over every period, so they have no deadline.
+  $('.deadline-field').classList.toggle('hidden', kind === 'focus');
 }
 
 function openModal() {
@@ -539,11 +858,41 @@ document.addEventListener('click', (e) => {
     case 'toggle-archive':
       state.archiveOpen = !state.archiveOpen;
       return render();
+    case 'toggle-timer':
+      return toggleTimer();
+    case 'edit-session':
+      state.editing = id;
+      return render();
+    case 'cancel-edit':
+      state.editing = null;
+      return render();
+    case 'save-session':
+      return saveSession(el, id);
+    case 'delete-session':
+      return confirmClick(el, 'Delete', () => call('focus_delete_session', { id }));
+    case 'overview-mode':
+      state.overview = el.dataset.mode;
+      return render();
+    case 'overview-shift':
+      shiftAnchor(Number(el.dataset.step));
+      return render();
+    case 'overview-today':
+      state.anchor = new Date();
+      return render();
   }
 });
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') return closeModal();
+  // Space starts or pauses the timer on the Focus tab, unless a control has focus.
+  if (e.key === ' ' && state.tab === 'focus' && $('#modal').classList.contains('hidden') && !e.target.closest?.('input, select, button')) {
+    e.preventDefault();
+    return toggleTimer();
+  }
+  if (e.key === 'Enter' && e.target.closest?.('.session-edit')) {
+    e.preventDefault();
+    return e.target.closest('.session-edit').querySelector('[data-action="save-session"]').click();
+  }
   if (e.key !== 'Enter') return;
   const input = e.target.closest?.('.actions input');
   if (!input) return;
@@ -559,6 +908,8 @@ $('#goal-form').addEventListener('submit', async (e) => {
   const input = { name: field('name'), category: field('category'), kind: state.kind, deadline: field('deadline') || null };
   if (state.kind === 'counter') {
     Object.assign(input, { target: num('target'), unit: field('unit'), start_value: num('start_value') });
+  } else if (state.kind === 'focus') {
+    Object.assign(input, { hours: num('hours'), period: field('period'), deadline: null });
   } else {
     const minutes = parseTime(field('time'));
     Object.assign(input, { distance_km: num('distance'), time_min: minutes > 0 ? minutes : null });
@@ -570,6 +921,7 @@ $('#goal-form').addEventListener('submit', async (e) => {
     closeModal();
     render();
     toast(`🎯 New goal: <b>${esc(input.name)}</b>`);
+    playEvents(res.events);
   } catch (err) {
     $('#form-error').textContent = String(err);
   }
@@ -581,5 +933,7 @@ setInterval(() => {
   const typing = document.activeElement?.tagName === 'INPUT';
   if (!typing && $('#modal').classList.contains('hidden')) call('get_state');
 }, 5 * 60 * 1000);
+
+setInterval(tickFocus, 1000);
 
 call('get_state');

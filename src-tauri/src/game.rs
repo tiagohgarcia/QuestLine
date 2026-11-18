@@ -1,4 +1,7 @@
-use crate::model::{Entry, EntryData, EntryRef, Goal, GoalKind, Profile, Quest, QuestKind, Store, UnlockedBadge, WeeklyQuests, XpEvent};
+use crate::model::{
+    Entry, EntryData, EntryRef, Goal, GoalKind, Period, Profile, Quest, QuestKind, Store, UnlockedBadge, WeeklyQuests, XpEvent,
+    XpSource,
+};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc};
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -25,13 +28,14 @@ pub enum GameEvent {
     GoalCompleted { goal: String, xp: u64 },
     PersonalBest { goal: String, xp: u64 },
     QuestCompleted { quest: String, xp: u64 },
+    FocusTargetReached { goal: String, period: Period, xp: u64 },
     BadgeUnlocked { name: &'static str, icon: &'static str },
     XpRevoked { reason: String, amount: u64 },
 }
 
 /// One-off things that happened during this update, used by badges.
 #[derive(Default)]
-struct Flags {
+pub(crate) struct Flags {
     lucky: bool,
     personal_best: bool,
 }
@@ -64,11 +68,11 @@ pub fn title_for(level: u32) -> &'static str {
     }
 }
 
-fn award_xp(
+pub(crate) fn award_xp(
     profile: &mut Profile,
     amount: u64,
     reason: String,
-    source: EntryRef,
+    source: XpSource,
     now: DateTime<Utc>,
     events: &mut Vec<GameEvent>,
 ) {
@@ -103,19 +107,19 @@ pub fn local_midnight(date: NaiveDate) -> DateTime<Utc> {
         .unwrap_or_else(|| Utc.from_utc_datetime(&naive))
 }
 
-/// The current Monday-to-Sunday week in local time.
-pub struct Week {
+/// A stretch of local days, e.g. a Monday-to-Sunday week or a calendar month.
+pub struct Span {
     pub key: String,
     pub first_day: NaiveDate,
     pub start: DateTime<Utc>,
     pub end: DateTime<Utc>,
 }
 
-pub fn week_of(now: DateTime<Utc>) -> Week {
+pub fn week_of(now: DateTime<Utc>) -> Span {
     let today = local_date(now);
     let first_day = today - Duration::days(today.weekday().num_days_from_monday() as i64);
     let iso = today.iso_week();
-    Week {
+    Span {
         key: format!("{}-W{:02}", iso.year(), iso.week()),
         first_day,
         start: local_midnight(first_day),
@@ -142,6 +146,25 @@ pub fn streaks(days: &BTreeSet<NaiveDate>, today: NaiveDate) -> (u32, u32) {
         day -= Duration::days(1);
     }
     (current, best)
+}
+
+/// The calendar month containing `day`, in local time.
+pub fn month_of(day: NaiveDate) -> Span {
+    let first_day = day.with_day(1).unwrap();
+    let next = first_day.checked_add_months(chrono::Months::new(1)).unwrap();
+    Span {
+        key: first_day.format("%Y-%m").to_string(),
+        first_day,
+        start: local_midnight(first_day),
+        end: local_midnight(next),
+    }
+}
+
+pub fn span_of(period: Period, day: NaiveDate) -> Span {
+    match period {
+        Period::Week => week_of(local_midnight(day)),
+        Period::Month => month_of(day),
+    }
 }
 
 // ---------- Progress ----------
@@ -210,9 +233,9 @@ pub fn apply_entry(store: &mut Store, goal_id: u64, data: EntryData, now: DateTi
     }
 
     for (xp, reason) in rewards {
-        award_xp(&mut store.profile, xp, reason, source, now, &mut events);
+        award_xp(&mut store.profile, xp, reason, source.into(), now, &mut events);
     }
-    check_quests(store, source, now, &mut events);
+    check_quests(store, source.into(), now, &mut events);
     check_badges(store, &flags, now, &mut events);
     Ok(events)
 }
@@ -231,7 +254,7 @@ pub fn undo_last_entry(store: &mut Store, goal_id: u64) -> Result<Vec<GameEvent>
     }
     let reason = format!("Undid last update on {}", goal.name);
     let source = EntryRef { goal_id, entry_id: entry.id };
-    let amount = revoke_xp(&mut store.profile, |s| *s == source);
+    let amount = revoke_xp(&mut store.profile, |s| *s == source.into());
     Ok(vec![GameEvent::XpRevoked { reason, amount }])
 }
 
@@ -239,13 +262,13 @@ pub fn undo_last_entry(store: &mut Store, goal_id: u64) -> Result<Vec<GameEvent>
 pub fn delete_goal(store: &mut Store, goal_id: u64) -> Result<Vec<GameEvent>, String> {
     let index = store.goals.iter().position(|g| g.id == goal_id).ok_or("Goal not found")?;
     let goal = store.goals.remove(index);
-    let amount = revoke_xp(&mut store.profile, |s| s.goal_id == goal_id);
+    let amount = revoke_xp(&mut store.profile, |s| s.goal_id() == Some(goal_id));
     Ok(vec![GameEvent::XpRevoked { reason: format!("Deleted {}", goal.name), amount }])
 }
 
 /// Removes the XP awards whose source matches, reopens quests they completed,
 /// and drops active days that no longer have any XP. Returns the XP removed.
-fn revoke_xp(profile: &mut Profile, revoked: impl Fn(&EntryRef) -> bool) -> u64 {
+pub(crate) fn revoke_xp(profile: &mut Profile, revoked: impl Fn(&XpSource) -> bool) -> u64 {
     let mut amount = 0;
     let mut days = BTreeSet::new();
     profile.xp_log.retain(|e| {
@@ -318,8 +341,13 @@ pub fn ensure_quests(store: &mut Store, now: DateTime<Utc>) -> bool {
 }
 
 /// Picks random active goals and sets a target that beats last week's ghost.
-fn goal_quests(store: &Store, week: &Week, count: usize) -> Vec<Quest> {
-    let mut active: Vec<&Goal> = store.goals.iter().filter(|g| !g.is_completed() && !g.is_archived()).collect();
+fn goal_quests(store: &Store, week: &Span, count: usize) -> Vec<Quest> {
+    // Focus goals have their own weekly or monthly target, so they get no quests.
+    let mut active: Vec<&Goal> = store
+        .goals
+        .iter()
+        .filter(|g| !g.is_completed() && !g.is_archived() && !matches!(g.kind, GoalKind::Focus { .. }))
+        .collect();
     fastrand::shuffle(&mut active);
     active
         .into_iter()
@@ -331,14 +359,14 @@ fn goal_quests(store: &Store, week: &Week, count: usize) -> Vec<Quest> {
                 let amount = (last_week * 1.2).ceil().max((target * 0.05).ceil()).max(1.0).min(remaining);
                 Quest { kind: QuestKind::AddToGoal { goal_id: g.id }, target: amount, xp: XP_GOAL_QUEST, completed: false, completed_by: None }
             }
-            GoalKind::Performance { .. } => {
+            GoalKind::Performance { .. } | GoalKind::Focus { .. } => {
                 Quest { kind: QuestKind::LogRuns { goal_id: g.id }, target: 2.0, xp: XP_GOAL_QUEST, completed: false, completed_by: None }
             }
         })
         .collect()
 }
 
-pub fn quest_progress(store: &Store, quest: &Quest, week: &Week) -> f64 {
+pub fn quest_progress(store: &Store, quest: &Quest, week: &Span) -> f64 {
     match quest.kind {
         QuestKind::AddToGoal { goal_id } => find_goal(store, goal_id)
             .map_or(0.0, |g| g.amount_between(Some(week.start), Some(week.end)).max(0.0)),
@@ -360,6 +388,7 @@ pub fn quest_title(store: &Store, quest: &Quest) -> String {
                 let unit = match &g.kind {
                     GoalKind::Counter { unit, .. } => unit.as_str(),
                     GoalKind::Performance { .. } => "",
+                    GoalKind::Focus { .. } => "h",
                 };
                 format!("Add {} to {}", format!("{n} {unit}").trim_end(), g.name)
             }
@@ -373,7 +402,7 @@ pub fn quest_title(store: &Store, quest: &Quest) -> String {
     }
 }
 
-fn check_quests(store: &mut Store, source: EntryRef, now: DateTime<Utc>, events: &mut Vec<GameEvent>) {
+pub(crate) fn check_quests(store: &mut Store, source: XpSource, now: DateTime<Utc>, events: &mut Vec<GameEvent>) {
     ensure_quests(store, now);
     let week = week_of(now);
     let Some(weekly) = store.profile.quests.as_ref() else {
@@ -424,7 +453,7 @@ pub const BADGES: &[BadgeDef] = &[
     BadgeDef { id: "elite", name: "Elite", icon: "💎", description: "Reach level 10" },
 ];
 
-fn check_badges(store: &mut Store, flags: &Flags, now: DateTime<Utc>, events: &mut Vec<GameEvent>) {
+pub(crate) fn check_badges(store: &mut Store, flags: &Flags, now: DateTime<Utc>, events: &mut Vec<GameEvent>) {
     let completed = store.goals.iter().filter(|g| g.is_completed()).count();
     let (_, best_streak) = streaks(&store.profile.active_days, local_date(now));
     let level = level_for(store.profile.xp);
@@ -661,7 +690,7 @@ mod tests {
         let events = add(&mut store, id, 1.0, day(14));
         assert_eq!(update_xp(&events), Some(XP_UPDATE + 20));
         let source = EntryRef { goal_id: id, entry_id: 1 };
-        assert!(store.profile.xp_log.iter().all(|e| e.source == Some(source)));
+        assert!(store.profile.xp_log.iter().all(|e| e.source == Some(source.into())));
         assert!(store.profile.active_days.contains(&date(14)));
         assert_xp_consistent(&store);
     }
@@ -964,7 +993,7 @@ mod tests {
         ensure_quests(&mut store, day(14));
         let events = add(&mut store, id, 1.0, day(14));
         assert!(events.iter().any(|e| matches!(e, GameEvent::QuestCompleted { xp: XP_GOAL_QUEST, .. })));
-        let source = Some(EntryRef { goal_id: id, entry_id: 1 });
+        let source = Some(XpSource::Entry(EntryRef { goal_id: id, entry_id: 1 }));
         let q = &store.profile.quests.as_ref().unwrap().quests[0];
         assert!(q.completed);
         assert_eq!(q.completed_by, source);
@@ -1189,14 +1218,14 @@ mod tests {
         let b = counter(&mut store, 10.0);
         add(&mut store, a, 10.0, day(14));
         add(&mut store, b, 1.0, day(14));
-        let a_xp: u64 = store.profile.xp_log.iter().filter(|e| e.source.unwrap().goal_id == a).map(|e| e.amount).sum();
+        let a_xp: u64 = store.profile.xp_log.iter().filter(|e| e.source.unwrap().goal_id() == Some(a)).map(|e| e.amount).sum();
         let total = store.profile.xp;
 
         let events = delete_goal(&mut store, a).unwrap();
         assert_eq!(revoked(&events), a_xp);
         assert_eq!(store.profile.xp, total - a_xp);
         assert!(find_goal(&store, a).is_none());
-        assert!(store.profile.xp_log.iter().all(|e| e.source.unwrap().goal_id == b));
+        assert!(store.profile.xp_log.iter().all(|e| e.source.unwrap().goal_id() == Some(b)));
         assert!(has_badge(&store, "goal_getter"), "badges are never revoked");
         assert_xp_consistent(&store);
     }

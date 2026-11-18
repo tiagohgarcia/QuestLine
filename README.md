@@ -112,6 +112,13 @@ On first start, the app copies that file to the new location if there is no save
   🗄 archives a goal: it leaves the board but keeps its XP, and can be restored from the Archive section.
   ✕ deletes a goal and takes back all the XP it earned.
   Badges stay once unlocked.
+- **Focus timer** (⏱️ Focus tab): start and pause it while you work; Space also toggles it.
+  Each full 25 minutes of a session earns 10 XP when you pause, and a day with at least one full block counts for your streak.
+  Today's sessions can be edited (e.g. if you forgot to pause) or deleted, which recalculates or takes back their XP.
+  The overview shows focus time per day for a week, month (calendar) or year (per month), with totals.
+- **Focus goals** track hours per week or month, e.g. 30 h every week.
+  They start over every period and pay 150 XP (week) or 400 XP (month) each time the target is reached.
+  Focus from earlier in the period counts, even before the goal was created.
 - **Milestones** at 25 / 50 / 75% give bonus XP, and reaching 100% triggers a celebration.
 - **Pace rival** (goals with a deadline): a 🏁 marker on the bar shows where you should be today.
 - **Ghost**: this week vs. last week at the same moment, per goal and for total XP.
@@ -122,6 +129,7 @@ On first start, the app copies that file to the new location if there is no save
 
 - `src-tauri/src/model.rs`: data types and progress math
 - `src-tauri/src/game.rs`: XP, levels, streaks, quests, badges
+- `src-tauri/src/focus.rs`: focus timer sessions and focus goals
 - `src-tauri/src/view.rs`: snapshots sent to the UI
 - `src-tauri/src/storage.rs`: JSON load/save
 - `src-tauri/src/main.rs`: Tauri commands

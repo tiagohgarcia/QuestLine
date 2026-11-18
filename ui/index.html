@@ -15,7 +15,11 @@
     <nav class="tabs">
       <button class="tab active" data-tab="goals">🎯 Goals</button>
       <button class="tab" data-tab="quests">🗺️ Quests <span id="quest-count" class="pill"></span></button>
+      <button class="tab" data-tab="focus">⏱️ Focus</button>
       <button class="tab" data-tab="trophies">🏆 Trophy Room</button>
+      <button id="focus-chip" class="focus-chip hidden" data-tab="focus" title="Focus timer is running">
+        <span class="dot"></span><span data-live="session"></span>
+      </button>
     </nav>
 
     <main id="main"></main>
@@ -29,7 +33,8 @@
 
         <div class="segmented" id="kind-toggle">
           <button type="button" data-kind="counter" class="on">🔢 Counter<small>Reach a number</small></button>
-          <button type="button" data-kind="performance">⏱️ Performance<small>Distance in a time</small></button>
+          <button type="button" data-kind="performance">🏃 Performance<small>Distance in a time</small></button>
+          <button type="button" data-kind="focus">⏱️ Focus<small>Hours per week or month</small></button>
         </div>
 
         <div class="kind-fields" data-for="counter">
@@ -47,7 +52,15 @@
           </div>
         </div>
 
-        <label>Deadline <span class="muted">· optional, unlocks the pace rival</span>
+        <div class="kind-fields hidden" data-for="focus">
+          <div class="row">
+            <label>Hours<input name="hours" type="number" min="0" step="any" placeholder="30" /></label>
+            <label>Every<select name="period"><option value="week">Week</option><option value="month">Month</option></select></label>
+          </div>
+          <p class="muted small hint">Measured by the focus timer. Starts over every week or month and pays XP each time you reach it.</p>
+        </div>
+
+        <label class="deadline-field">Deadline <span class="muted">· optional, unlocks the pace rival</span>
           <input name="deadline" type="date" placeholder="YYYY-MM-DD" />
         </label>
 
